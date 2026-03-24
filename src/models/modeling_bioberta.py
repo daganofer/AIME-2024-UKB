@@ -11,6 +11,18 @@ from .modeling_mixedtab import MixedTabModel
 from .modeling_ucad import UCADModel
 from .lm_head import MixedTabLMHead
 
+# Hawkes temporal attention — lazy import to avoid hard dependency.
+# When use_hawkes_attention=True in config, HawkesUCADModel replaces UCADModel.
+try:
+    from allofus.hawkes_attention import (
+        HawkesUCADModel,
+        date_ids_to_days,
+        assign_bos_timestamp,
+    )
+    _HAWKES_AVAILABLE = True
+except ImportError:
+    _HAWKES_AVAILABLE = False
+
 
 class BioBERTa(RobertaPreTrainedModel):
     def __init__(self, config, encoder_num_hidden_layers=2):
@@ -65,7 +77,15 @@ class BioBERTaForMaskedLM(RobertaPreTrainedModel):
             config, encoder_num_hidden_layers=encoder_num_hidden_layers
         )
 
-        self.fused_decoder = UCADModel(config)
+        self.use_hawkes = getattr(config, "use_hawkes_attention", False)
+        if self.use_hawkes:
+            assert _HAWKES_AVAILABLE, (
+                "use_hawkes_attention=True but allofus.hawkes_attention not importable. "
+                "Ensure the mdd-analysis-pipeline/allofus dir is on sys.path."
+            )
+            self.fused_decoder = HawkesUCADModel(config)
+        else:
+            self.fused_decoder = UCADModel(config)
         self.use_encoder = config.use_encoder
 
         self.lab_lm_head = MixedTabLMHead(config)
@@ -165,6 +185,33 @@ class BioBERTaForMaskedLM(RobertaPreTrainedModel):
             output_hidden_states=output_hidden_states,
         )
 
+        # Compute raw-day timestamps for Hawkes temporal kernels
+        hawkes_kwargs = {}
+        if self.use_hawkes:
+            disease_ts = date_ids_to_days(
+                disease["year_ids"], disease["month_ids"], disease["day_ids"]
+            )
+            disease_ts = assign_bos_timestamp(
+                disease_ts, disease["attention_mask"], method="cutoff"
+            )
+            drug_ts = date_ids_to_days(
+                drug["year_ids"], drug["month_ids"], drug["day_ids"]
+            )
+            drug_ts = assign_bos_timestamp(
+                drug_ts, drug["attention_mask"], method="cutoff"
+            )
+            lab_ts = date_ids_to_days(
+                lab["year_ids"], lab["month_ids"], lab["day_ids"]
+            )
+            lab_ts = assign_bos_timestamp(
+                lab_ts, lab["attention_mask"], method="cutoff"
+            )
+            hawkes_kwargs = dict(
+                disease_timestamps=disease_ts,
+                drug_timestamps=drug_ts,
+                lab_timestamps=lab_ts,
+            )
+
         fused_outputs = self.fused_decoder(
             # MAIN INPUTS
             **disease,
@@ -176,6 +223,8 @@ class BioBERTaForMaskedLM(RobertaPreTrainedModel):
             drug_attention_mask=drug["attention_mask"],
             lab_attention_mask=lab["attention_mask"],
             personal_attention_mask=personal["attention_mask"],
+            # TIMESTAMPS (Hawkes only)
+            **hawkes_kwargs,
             # OTHER ARGS
             output_attentions=output_attentions,
             output_hidden_states=output_hidden_states,

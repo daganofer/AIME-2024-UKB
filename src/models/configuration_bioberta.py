@@ -10,5 +10,6 @@ class BioBertaConfig(RobertaConfig):
         self.pool_self = False
         self.use_temporal = True
         self.use_encoder = True
+        self.use_hawkes_attention = False  # Enable Hawkes temporal cross-attention
 
         super().__init__(**kwargs)
