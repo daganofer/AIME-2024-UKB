@@ -57,11 +57,20 @@ def init_spark():
     return spark
 
 
+def get_entity(dataset, name):
+    """Look up an entity by name from the dataset's entity list."""
+    for e in dataset.entities:
+        if e.name == name:
+            return e
+    raise KeyError(f"Entity '{name}' not found. Available: {[e.name for e in dataset.entities]}")
+
+
 def load_dataset():
     """Load the UKB dataset via dxdata."""
     print(f"\n=== Loading dataset {DATASET_ID} ===")
     dataset = dxdata.load_dataset(id=DATASET_ID)
     print(f"  Dataset loaded")
+    print(f"  Entities: {[e.name for e in dataset.entities]}")
     return dataset
 
 
@@ -69,14 +78,15 @@ def extract_gp_scripts(dataset, spark):
     """Extract GP scripts entity table with all available columns."""
     print("\n=== Extracting GP scripts ===")
 
-    gp = dataset.entities["gp_scripts"]
+    gp = get_entity(dataset, "gp_scripts")
     fields = [f.name for f in gp.fields]
     print(f"  Available columns: {fields}")
     has_quantity = "quantity" in fields
     print(f"  Has 'quantity' column: {has_quantity}")
 
-    # Load via Spark
-    gp_df = gp.retrieve_fields(engine=spark, coding_values="replace")
+    # Load via Spark — retrieve all fields
+    all_gp_fields = list(gp.fields)
+    gp_df = gp.retrieve_fields(fields=all_gp_fields, engine=spark, coding_values="replace")
     row_count = gp_df.count()
     print(f"  Total rows: {row_count}")
 
@@ -112,7 +122,7 @@ def extract_disease_onset(dataset, spark):
     print("\n=== Extracting disease onset (First Occurrence fields) ===")
 
     # Find all p131XXX fields
-    participant = dataset.entities["participant"]
+    participant = get_entity(dataset, "participant")
     all_fields = [f.name for f in participant.fields]
     fo_fields = sorted([f for f in all_fields if f.startswith("p131")])
     print(f"  Found {len(fo_fields)} First Occurrence fields")
@@ -126,13 +136,13 @@ def extract_disease_onset(dataset, spark):
     batches = [fo_fields[i:i + BATCH_SIZE] for i in range(0, len(fo_fields), BATCH_SIZE)]
     print(f"  Extracting in {len(batches)} batches of ~{BATCH_SIZE} fields")
 
+    eid_field = participant.find_field(name="eid")
     result_df = None
     for i, batch in enumerate(batches):
         print(f"  Batch {i+1}/{len(batches)}: {len(batch)} fields ({batch[0]}..{batch[-1]})")
-        fields_to_retrieve = [participant.find_field(name="eid")] + \
-                             [participant.find_field(name=f) for f in batch]
+        field_objects = [eid_field] + [participant.find_field(name=f) for f in batch]
         batch_df = participant.retrieve_fields(
-            names=["eid"] + batch,
+            fields=field_objects,
             engine=spark,
             coding_values="raw",
         )
@@ -170,7 +180,7 @@ def extract_participant_data(dataset, spark):
         field_ids = [line.strip() for line in f if line.strip()]
     print(f"  Fields to extract: {len(field_ids)}")
 
-    participant = dataset.entities["participant"]
+    participant = get_entity(dataset, "participant")
     all_field_names = [f.name for f in participant.fields]
 
     # Map field IDs to dxdata field names (p<id>_i<instance>)
@@ -193,16 +203,18 @@ def extract_participant_data(dataset, spark):
 
     # Extract in batches
     BATCH_SIZE = 100
-    field_batches = [fields_to_get[i:i + BATCH_SIZE] for i in range(1, len(fields_to_get), BATCH_SIZE)]
-    print(f"  Extracting in {len(field_batches)} batches")
+    # fields_to_get[0] is "eid", rest are field names
+    field_name_batches = [fields_to_get[i:i + BATCH_SIZE] for i in range(1, len(fields_to_get), BATCH_SIZE)]
+    print(f"  Extracting in {len(field_name_batches)} batches")
 
+    eid_field = participant.find_field(name="eid")
     result_df = None
-    for i, batch in enumerate(field_batches):
-        print(f"  Batch {i+1}/{len(field_batches)}: {len(batch)} fields")
-        batch_with_eid = ["eid"] + batch
+    for i, batch in enumerate(field_name_batches):
+        print(f"  Batch {i+1}/{len(field_name_batches)}: {len(batch)} fields")
         try:
+            field_objects = [eid_field] + [participant.find_field(name=fn) for fn in batch]
             batch_df = participant.retrieve_fields(
-                names=batch_with_eid,
+                fields=field_objects,
                 engine=spark,
                 coding_values="raw",
             )
